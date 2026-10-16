@@ -85,6 +85,17 @@ enum {
     // v1_6
     kParamNotePolyAccent,
     kParamNoteGhost,
+    // v1.8
+    kParamCountIn,
+    kParamCountMidi,
+    kParamCountClock,
+    kParamMidiClockOut,
+    kParamRecArm,
+    kParamRecLength,
+    kParamRecOut,
+    kParamRecMode,
+    kParamRecNote,
+    kParamRunOut,
 
     kNumParams
 };
@@ -92,7 +103,7 @@ enum {
 static const char* const enumSource[] = {"CV", "MIDI", "Internal", NULL};
 static const char* const enumMidiMode[] = {"Transport", "Clock only", NULL};
 static const char* const enumCvRes[] = {"24 PPQN", "4 PPQN (1/16)", "2 PPQN (1/8)", "1 PPQN (1/4)", "1 per bar", NULL};
-static const char* const enumCvTransport[] = {"RUN", "RESET", "NONE", NULL};
+static const char* const enumCvTransport[] = {"RUN", "RESET", "NONE", "TOGGLE", NULL};
 static const char* const enumRun[] = {"Stop", "Play", NULL};
 static const char* const enumTimeSig[] = {"4/4", "3/4", "6/8", "2/4", "12/8", "2/2",
                                           "5/4", "7/8", "9/8", "5/8", "7/4", NULL};
@@ -102,6 +113,11 @@ static const char* const enumResetMode[] = {"Cycle", "Start only", NULL};
 static const char* const enumBarResetMode[] = {"Bar", "Start only", NULL};
 static const char* const enumOffOn[] = {"Off", "On", NULL};
 static const char* const enumSound[] = {"Classic", "Soft", NULL};
+static const char* const enumCountIn[] = {"Off", "1 bar", "2 bars", "3 bars", "4 bars", NULL};
+static const char* const enumRecLength[] = {"Manual", "1 bar", "2 bars", "4 bars", "8 bars", "16 bars", NULL};
+static const int kRecLengthBars[] = {0, 1, 2, 4, 8, 16};
+static const char* const enumRecMode[] = {"Trigger", "Gate", NULL};
+static const char* const enumCountClock[] = {"Wait", "Run", NULL};
 static const char* const enumTrigMode[] = {"All hits", "No ghosts", NULL};
 static const char* const enumMidiDest[] = {"USB", "Breakout", "Select Bus", "Internal", "USB + Breakout", "All", NULL};
 static const uint32_t kMidiDestMask[] = {
@@ -109,8 +125,9 @@ static const uint32_t kMidiDestMask[] = {
     kNT_destinationUSB | kNT_destinationBreakout,
     kNT_destinationUSB | kNT_destinationBreakout | kNT_destinationSelectBus | kNT_destinationInternal};
 static const char* const enumMidiLayers[] = {"All",           "Metronome",       "Polyrhythm",     "Pattern",
-                                             "Metro + Poly",  "Metro + Pattern", "Poly + Pattern", NULL};
-static const uint8_t kMidiLayerMask[] = {7, 1, 2, 4, 3, 5, 6};
+                                             "Metro + Poly",  "Metro + Pattern", "Poly + Pattern", "None", NULL};
+static const uint8_t kMidiLayerMask[] = {7, 1, 2, 4, 3, 5, 6, 0};
+enum { kMidiLayersNone = 7 };
 static const char* const enumPolyPreset[] = {"Custom", "3:2", "2:3", "3:4", "4:3", "6:4",
                                              "5:4",    "4:5", "5:3", "7:4", "3:8", NULL};
 static const char* const enumPolyClockRes[] = {"1 per pulse", "4 per pulse", "24 per pulse", NULL};
@@ -130,9 +147,9 @@ static const _NT_parameter kParameterTemplate[] = {
     NT_PARAMETER_CV_INPUT("CV clock input", 0, 1)
     METRO_ENUM("CV clock res", 4, 0, enumCvRes)
     NT_PARAMETER_CV_INPUT("CV transport in", 0, 2)
-    METRO_ENUM("CV transport", 2, 1, enumCvTransport)
+    METRO_ENUM("CV transport", 3, 1, enumCvTransport)
     {.name = "Internal BPM", .min = 200, .max = 3000, .def = 1200, .unit = kNT_unitBPM, .scaling = kNT_scaling10, .enumStrings = NULL},
-    METRO_ENUM("Internal run", 1, 1, enumRun)
+    METRO_ENUM("Play", 1, 0, enumRun)  // internal clock transport; always stopped after loading
     NT_PARAMETER_CV_INPUT("Tap input", 0, 0)
     // Every step to the right is one tap (left does nothing), so you can keep turning.
     // A mapped gate/note taps once per rising edge.
@@ -183,10 +200,10 @@ static const _NT_parameter kParameterTemplate[] = {
     METRO_ENUM("Pat trig mode", 1, 0, enumTrigMode)
     NT_PARAMETER_CV_OUTPUT("Pat ghost out", 0, 0)
     NT_PARAMETER_CV_OUTPUT("Pat velocity out", 0, 0)
-    METRO_ENUM("MIDI out", 1, 0, enumOffOn)
+    METRO_ENUM("MIDI out", 1, 0, enumOffOn)  // master switch for all MIDI output
     METRO_ENUM("MIDI out dest", 5, 0, enumMidiDest)
     METRO_INT("MIDI out channel", 1, 16, 10)
-    METRO_ENUM("MIDI layers", 6, 0, enumMidiLayers)
+    METRO_ENUM("MIDI layers", 7, 0, enumMidiLayers)
     {.name = "Downbeat note", .min = 0, .max = 127, .def = 76, .unit = kNT_unitMIDINote, .scaling = 0, .enumStrings = NULL},
     {.name = "Beat note", .min = 0, .max = 127, .def = 77, .unit = kNT_unitMIDINote, .scaling = 0, .enumStrings = NULL},
     {.name = "Subdiv note", .min = 0, .max = 127, .def = 42, .unit = kNT_unitMIDINote, .scaling = 0, .enumStrings = NULL},
@@ -196,11 +213,19 @@ static const _NT_parameter kParameterTemplate[] = {
     // v1_6
     {.name = "Poly accent note", .min = 0, .max = 127, .def = 56, .unit = kNT_unitMIDINote, .scaling = 0, .enumStrings = NULL},
     {.name = "Pat ghost note", .min = 0, .max = 127, .def = 75, .unit = kNT_unitMIDINote, .scaling = 0, .enumStrings = NULL},
+    // v1.8
+    METRO_ENUM("Count-in", 4, 0, enumCountIn)
+    METRO_ENUM("MIDI count out", 1, 0, enumOffOn)
+    METRO_ENUM("Count-in clock", 1, 0, enumCountClock)
+    METRO_ENUM("MIDI clock out", 1, 0, enumOffOn)
+    METRO_ENUM("Rec arm", 1, 0, enumOffOn)
+    METRO_ENUM("Rec length", 5, 0, enumRecLength)
+    NT_PARAMETER_CV_OUTPUT("Rec out", 0, 0)
+    METRO_ENUM("Rec out mode", 1, 0, enumRecMode)
+    {.name = "Rec MIDI note", .min = 0, .max = 128, .def = 128, .unit = kNT_unitHasStrings, .scaling = 0, .enumStrings = NULL},
+    NT_PARAMETER_CV_OUTPUT("Run out", 0, 0)
 };
 
-static const uint8_t pageClock[] = {kParamSource,      kParamMidiMode,      kParamCvClockIn,  kParamCvClockRes,
-                                    kParamCvTransportIn, kParamCvTransportMode, kParamInternalBpm, kParamInternalRun,
-                                    kParamTapIn,       kParamTap};
 static const uint8_t pageMetro[] = {kParamTimeSig,      kParamDivision,     kParamMetroAudio,   kParamDownLevel,
                                     kParamBeatLevel,    kParamSubLevel,     kParamMetroOut,     kParamMetroOutMode,
                                     kParamBaseClockOut, kParamBaseClockRes, kParamBaseResetOut, kParamBaseResetMode};
@@ -212,23 +237,17 @@ static const uint8_t pagePattern[] = {kParamPatEnable,   kParamPatGroup,    kPar
                                       kParamPatAudio,    kParamPatLevel,    kParamPatAccent,    kParamPatOut,
                                       kParamPatOutMode,  kParamPatTrigOut,  kParamPatTrigMode,  kParamPatAccentOut,
                                       kParamPatGhostOut, kParamPatVelOut,   kParamPatResetOut,  kParamPatResetMode};
-static const uint8_t pageGlobal[] = {kParamMaster,    kParamMute,       kParamSound,       kParamMidiOut,
-                                     kParamMidiDest,  kParamMidiChannel, kParamMidiLayers, kParamNoteDown,
-                                     kParamNoteBeat,  kParamNoteSub,    kParamNotePoly,    kParamNotePolyAccent,
-                                     kParamNotePattern, kParamNoteAccent, kParamNoteGhost};
+static const uint8_t pageGlobal[] = {kParamMaster,       kParamMute,         kParamSound,       kParamMidiOut,
+                                     kParamMidiDest,     kParamMidiClockOut, kParamMidiChannel, kParamMidiLayers,
+                                     kParamCountMidi,    kParamNoteDown,     kParamNoteBeat,    kParamNoteSub,
+                                     kParamNotePoly,     kParamNotePolyAccent, kParamNotePattern, kParamNoteAccent,
+                                     kParamNoteGhost};
 
-static const _NT_parameterPage pages[] = {
-    {.name = "Clock & Transport", .numParams = METRO_ARRAY_SIZE(pageClock), .group = 0, .unused = {0, 0}, .params = pageClock},
-    {.name = "Metronome", .numParams = METRO_ARRAY_SIZE(pageMetro), .group = 0, .unused = {0, 0}, .params = pageMetro},
-    {.name = "Polyrhythm", .numParams = METRO_ARRAY_SIZE(pagePoly), .group = 0, .unused = {0, 0}, .params = pagePoly},
-    {.name = "Pattern", .numParams = METRO_ARRAY_SIZE(pagePattern), .group = 0, .unused = {0, 0}, .params = pagePattern},
-    {.name = "Output", .numParams = METRO_ARRAY_SIZE(pageGlobal), .group = 0, .unused = {0, 0}, .params = pageGlobal},
-};
-
-static const _NT_parameterPages parameterPages = {
-    .numPages = METRO_ARRAY_SIZE(pages),
-    .pages = pages,
-};
+// Pages 0 (Clock & Transport) and 1 (Count-in & Rec) change with the clock source and
+// MIDI clock out, so each instance builds its own copy (see buildPages()).
+enum { kPageClock = 0, kPageRec, kNumPages, kMaxDynParams = 16 };
+static const char* const kPageNames[] = {"Clock & Transport", "Count-in & Rec", "Metronome", "Polyrhythm", "Pattern",
+                                         "Output"};
 
 enum { kMaxGroupSize = 16 };
 
@@ -246,6 +265,10 @@ struct MetronomeAlgorithm : public _NT_algorithm {
     volatile uint32_t tapRequests;  // encoder-button taps from the UI thread
     uint32_t tapsHandled;
     _NT_parameter params[kNumParams];
+    _NT_parameterPage pageList[6];
+    _NT_parameterPages pageSet;
+    uint8_t dynParams[kNumPages][kMaxDynParams];
+    int pagesInternal, pagesMidiClock;  // state the dynamic pages were built for
     const char* groupNames[metro::kNumPatternGroups][kMaxGroupSize + 1];
 };
 }  // namespace
@@ -258,6 +281,49 @@ static void calculateRequirements(_NT_algorithmRequirements& req, const int32_t*
     req.dram = 0;
     req.dtc = 0;
     req.itc = 0;
+}
+
+static void setPage(_NT_parameterPage& pg, const char* name, const uint8_t* params, int n) {
+    pg.name = name;
+    pg.numParams = (uint8_t)n;
+    pg.group = 0;
+    pg.unused[0] = pg.unused[1] = 0;
+    pg.params = params;
+}
+
+// Play appears on the Clock page only with the internal clock; MIDI out dest appears on
+// the Count-in page only while MIDI clock out is on. A parameter listed on two pages is
+// the same parameter, so the copies always agree.
+static void buildPages(MetronomeAlgorithm* a, bool internal, bool midiClock) {
+    uint8_t* c = a->dynParams[kPageClock];
+    int n = 0;
+    const uint8_t clock[] = {kParamSource,        kParamMidiMode,        kParamCvClockIn,   kParamCvClockRes,
+                             kParamCvTransportIn, kParamCvTransportMode, kParamInternalBpm};
+    for (unsigned i = 0; i < METRO_ARRAY_SIZE(clock); ++i) c[n++] = clock[i];
+    if (internal) c[n++] = kParamInternalRun;
+    c[n++] = kParamTapIn;
+    c[n++] = kParamTap;
+    setPage(a->pageList[kPageClock], kPageNames[0], c, n);
+
+    uint8_t* r = a->dynParams[kPageRec];
+    n = 0;
+    r[n++] = kParamInternalRun;
+    r[n++] = kParamCountIn;
+    r[n++] = kParamCountClock;
+    r[n++] = kParamMidiClockOut;
+    if (midiClock) r[n++] = kParamMidiDest;
+    const uint8_t rec[] = {kParamRecArm, kParamRecLength, kParamRecOut, kParamRecMode, kParamRecNote, kParamRunOut};
+    for (unsigned i = 0; i < METRO_ARRAY_SIZE(rec); ++i) r[n++] = rec[i];
+    setPage(a->pageList[kPageRec], kPageNames[1], r, n);
+
+    setPage(a->pageList[2], kPageNames[2], pageMetro, METRO_ARRAY_SIZE(pageMetro));
+    setPage(a->pageList[3], kPageNames[3], pagePoly, METRO_ARRAY_SIZE(pagePoly));
+    setPage(a->pageList[4], kPageNames[4], pagePattern, METRO_ARRAY_SIZE(pagePattern));
+    setPage(a->pageList[5], kPageNames[5], pageGlobal, METRO_ARRAY_SIZE(pageGlobal));
+    a->pageSet.numPages = 6;
+    a->pageSet.pages = a->pageList;
+    a->pagesInternal = internal;
+    a->pagesMidiClock = midiClock;
 }
 
 static void loadPatternGroup(MetronomeAlgorithm* a, int g) {
@@ -280,7 +346,9 @@ static _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs, const _NT_a
     loadPatternGroup(alg, 0);
     alg->params[kParamPattern].def = 0;
     alg->parameters = alg->params;
-    alg->parameterPages = &parameterPages;
+    buildPages(alg, kParameterTemplate[kParamSource].def == metro::kSourceInternal,
+               kParameterTemplate[kParamMidiClockOut].def != 0);
+    alg->parameterPages = &alg->pageSet;
     alg->engine.init((float)NT_globals.sampleRate);
     return alg;
 }
@@ -315,6 +383,10 @@ static void updateGreyOuts(_NT_algorithm* self) {
     grey(self, kParamCvTransportMode, midi);
     grey(self, kParamInternalBpm, !internal);
     grey(self, kParamInternalRun, !internal);
+    grey(self, kParamCountIn, !internal);
+    grey(self, kParamCountMidi, !internal || !v[kParamMidiOut]);
+    grey(self, kParamCountClock, !internal);
+    grey(self, kParamMidiClockOut, midi);
     grey(self, kParamTapIn, !internal);
     grey(self, kParamTap, !internal);
     const bool poly = v[kParamPolyEnable] != 0;
@@ -325,6 +397,18 @@ static void updateGreyOuts(_NT_algorithm* self) {
     if (pat) grey(self, kParamSwing, !metro::kPatterns[currentPatternIndex(v)].swing);
     const bool midiOut = v[kParamMidiOut] != 0;
     for (int p = kParamMidiDest; p <= kParamNoteGhost; ++p) grey(self, p, !midiOut);
+    grey(self, kParamMidiClockOut, midi);  // a clock follower never re-sends MIDI clock
+    grey(self, kParamRecNote, false);
+}
+
+static void refreshPages(_NT_algorithm* self) {
+    MetronomeAlgorithm* a = (MetronomeAlgorithm*)self;
+    const bool internal = self->v[kParamSource] == metro::kSourceInternal;
+    const bool midiClock = self->v[kParamMidiClockOut] != 0;
+    if (internal == (a->pagesInternal != 0) && midiClock == (a->pagesMidiClock != 0)) return;
+    buildPages(a, internal, midiClock);
+    int32_t idx = algIndex(self);
+    if (idx >= 0) NT_updateParameterPages((uint32_t)idx);
 }
 
 static void parameterChanged(_NT_algorithm* self, int p) {
@@ -366,9 +450,25 @@ static void parameterChanged(_NT_algorithm* self, int p) {
             updateGreyOuts(self);
             break;
         }
+        case kParamMidiClockOut:
+        case kParamRecNote: {
+            // MIDI clock out / Rec MIDI note need MIDI out (the master switch). Switching
+            // MIDI out on for them sets MIDI layers to None, so no drum notes appear.
+            const bool wants = p == kParamMidiClockOut ? v[kParamMidiClockOut] != 0 : v[kParamRecNote] < 128;
+            if (wants && !v[kParamMidiOut] && a->blocks >= 200) {
+                setParam(self, kParamMidiLayers, kMidiLayersNone);
+                setParam(self, kParamMidiOut, 1);
+            }
+            refreshPages(self);
+            updateGreyOuts(self);
+            break;
+        }
+        case kParamSource:
+            refreshPages(self);
+            updateGreyOuts(self);
+            break;
         case kParamPattern:
         case kParamMidiOut:
-        case kParamSource:
         case kParamCvTransportMode:
         case kParamPolyEnable:
         case kParamPatEnable:
@@ -392,7 +492,7 @@ static void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     s.cvResolution = v[kParamCvClockRes];
     s.cvTransport = v[kParamCvTransportMode];
     s.internalBpm = v[kParamInternalBpm] * 0.1f;
-    s.internalRun = v[kParamInternalRun] != 0;
+    s.play = a->blocks >= 200 && v[kParamInternalRun] != 0;  // never start while a preset is loading
     s.meter = v[kParamTimeSig];
     s.division = v[kParamDivision];
     s.metroAudio = v[kParamMetroAudio] != 0;
@@ -422,10 +522,18 @@ static void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     s.patTrigMode = v[kParamPatTrigMode];
     s.midiOut = v[kParamMidiOut] != 0;
     s.midiChannel = v[kParamMidiChannel];
-    s.midiLayers = kMidiLayerMask[metro::clampi(v[kParamMidiLayers], 0, 6)];
+    s.midiLayers = kMidiLayerMask[metro::clampi(v[kParamMidiLayers], 0, 7)];
     for (int i = 0; i <= metro::kVoicePatAccent; ++i) s.midiNote[i] = v[kParamNoteDown + i];
     s.midiNote[metro::kVoicePolyAccent] = v[kParamNotePolyAccent];
     s.midiNote[metro::kVoicePatGhost] = v[kParamNoteGhost];
+    s.countInBars = v[kParamCountIn];
+    s.countInMidi = v[kParamCountMidi] != 0;
+    s.countInClock = v[kParamCountClock] != 0;
+    s.midiClockOut = v[kParamMidiClockOut] != 0;
+    s.recArm = v[kParamRecArm] != 0;
+    s.recLengthBars = kRecLengthBars[metro::clampi(v[kParamRecLength], 0, 5)];
+    s.recMode = v[kParamRecMode];
+    s.recNote = v[kParamRecNote] >= 128 ? -1 : v[kParamRecNote];
 
     const int clockBus = v[kParamCvClockIn];
     const int transportBus = v[kParamCvTransportIn];
@@ -445,6 +553,7 @@ static void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         if (s.source == metro::kSourceInternal) a->engine.tapNow();
         a->tapsHandled = req;
     }
+    if (a->blocks == 0 && v[kParamInternalRun]) setParam(self, kParamInternalRun, 0);  // stopped after loading
     if (a->blocks < 0xFFFFFFFFu) ++a->blocks;
 
     metro::Outputs o;
@@ -462,7 +571,12 @@ static void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     o.trig[metro::kOutPatAccent] = s.patEnable ? busPtr(busFrames, v[kParamPatAccentOut], numFrames) : NULL;
     o.trig[metro::kOutPatReset] = s.patEnable ? busPtr(busFrames, v[kParamPatResetOut], numFrames) : NULL;
     o.trig[metro::kOutPatGhost] = s.patEnable ? busPtr(busFrames, v[kParamPatGhostOut], numFrames) : NULL;
-    o.velocity = s.patEnable ? busPtr(busFrames, v[kParamPatVelOut], numFrames) : NULL;
+    o.level[metro::kLvlVelocity] = s.patEnable ? busPtr(busFrames, v[kParamPatVelOut], numFrames) : NULL;
+    float* recBus = busPtr(busFrames, v[kParamRecOut], numFrames);
+    o.trig[metro::kOutRecTrig] = s.recMode == metro::kRecTrigger ? recBus : NULL;
+    o.level[metro::kLvlRecGate] = s.recMode == metro::kRecGate ? recBus : NULL;
+    o.level[metro::kLvlRun] = busPtr(busFrames, v[kParamRunOut], numFrames);
+    o.level[metro::kLvlCountIn] = NULL;
 
     const bool cvSource = s.source == metro::kSourceCV;
     a->engine.process(s, cvSource ? busPtr(busFrames, clockBus, numFrames) : NULL,
@@ -474,8 +588,19 @@ static void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     if (nm) {
         const uint32_t dest = kMidiDestMask[metro::clampi(v[kParamMidiDest], 0, 5)];
         const metro::MidiMsg* m = a->engine.midiMessages();
-        for (int i = 0; i < nm; ++i) NT_sendMidi3ByteMessage(dest, m[i].b0, m[i].b1, m[i].b2);
+        for (int i = 0; i < nm; ++i) {
+            if (m[i].len == 1) NT_sendMidiByte(dest, m[i].b0);
+            else NT_sendMidi3ByteMessage(dest, m[i].b0, m[i].b1, m[i].b2);
+        }
     }
+
+    // Keep the Play and Rec arm parameters in step with the engine (gate / toggle starts,
+    // quantized stops, finished takes).
+    if (a->blocks >= 200 && s.source == metro::kSourceInternal) {
+        const bool on = a->engine.transportOn();
+        if (on != (v[kParamInternalRun] != 0)) setParam(self, kParamInternalRun, on ? 1 : 0);
+    }
+    if (a->engine.takeRecDisarm() && v[kParamRecArm]) setParam(self, kParamRecArm, 0);
 
     float tapped;
     if (a->engine.takeTapBpm(tapped)) {
@@ -529,12 +654,12 @@ static bool draw(_NT_algorithm* self) {
     const int16_t* v = a->v;
     const metro::Engine& e = a->engine;
 
-    static const char* const statusText[] = {"STOPPED", "WAITING", "ACQUIRING", "RUNNING", "CLOCK LOST"};
+    static const char* const statusText[] = {"STOPPED", "WAITING", "ACQUIRING", "RUNNING", "CLOCK LOST", "COUNT-IN"};
     static const char* const sourceText[] = {"CV", "MIDI", "INTERNAL"};
     static const char* const divText[] = {"beats", "1/4", "1/8", "1/16"};
 
     const int st = (int)e.status();
-    const bool playing = st == metro::kStatusRunning || st == metro::kStatusAcquiring;
+    const bool playing = st == metro::kStatusRunning || st == metro::kStatusAcquiring || st == metro::kStatusCountIn;
 
     NT_drawText(0, 20, sourceText[metro::clampi(v[kParamSource], 0, 2)], 15, kNT_textLeft, kNT_textNormal);
     if (v[kParamSource] == metro::kSourceMIDI && v[kParamMidiMode] == metro::kMidiClockOnly)
@@ -542,13 +667,23 @@ static bool draw(_NT_algorithm* self) {
     NT_drawText(255, 20, statusText[st], st == metro::kStatusRunning ? 15 : 10, kNT_textRight, kNT_textNormal);
 
     char buf[40];
-    formatBpm(buf, e.bpm());
-    NT_drawText(0, 44, buf, 15, kNT_textLeft, kNT_textLarge);
-    NT_drawText(80, 44, "BPM", 8, kNT_textLeft, kNT_textNormal);
-    if (v[kParamSource] == metro::kSourceInternal) NT_drawText(80, 34, "R-enc: tap", 6, kNT_textLeft, kNT_textTiny);
+    const bool counting = st == metro::kStatusCountIn;
+    if (counting) {
+        char* p = appendStr(buf, "IN ");
+        appendInt(p, e.countBarsLeft());
+        NT_drawText(0, 44, buf, 15, kNT_textLeft, kNT_textLarge);
+        formatBpm(buf, e.bpm());
+        NT_drawText(80, 44, buf, 8, kNT_textLeft, kNT_textNormal);
+    } else {
+        formatBpm(buf, e.bpm());
+        NT_drawText(0, 44, buf, 15, kNT_textLeft, kNT_textLarge);
+        NT_drawText(80, 44, "BPM", 8, kNT_textLeft, kNT_textNormal);
+    }
+    if (v[kParamSource] == metro::kSourceInternal)
+        NT_drawText(80, 34, st == metro::kStatusStopped ? "L:play R:tap" : "L:stop R:tap", 6, kNT_textLeft, kNT_textTiny);
 
     const int beats = e.beatsPerBar();
-    const int cur = e.beat();
+    const int cur = counting ? e.countBeat() : e.beat();
     const int gap = 4, top = 26, bottom = 42, areaW = 140;
     int cellW = (areaW - (beats - 1) * gap) / beats;
     if (cellW > 24) cellW = 24;
@@ -584,7 +719,14 @@ static bool draw(_NT_algorithm* self) {
 
     NT_drawText(0, 63, enumTimeSig[metro::clampi(v[kParamTimeSig], 0, 10)], 12, kNT_textLeft, kNT_textNormal);
     NT_drawText(40, 63, divText[metro::clampi(v[kParamDivision], 0, 3)], 12, kNT_textLeft, kNT_textNormal);
-    if (v[kParamMute]) NT_drawText(255, 63, "MUTED", 15, kNT_textRight, kNT_textNormal);
+    const int rs = e.recState();
+    if (rs == metro::kRecRecording || rs == metro::kRecEnding) {
+        char* p = appendStr(buf, rs == metro::kRecEnding ? "REC END " : "REC ");
+        p = appendInt(p, e.recBars() + 1);
+        if (v[kParamRecLength] > 0) { p = appendStr(p, "/"); appendInt(p, kRecLengthBars[v[kParamRecLength]]); }
+        NT_drawText(255, 63, buf, 15, kNT_textRight, kNT_textNormal);
+    } else if (rs == metro::kRecWaiting) NT_drawText(255, 63, "ARMED", 15, kNT_textRight, kNT_textNormal);
+    else if (v[kParamMute]) NT_drawText(255, 63, "MUTED", 15, kNT_textRight, kNT_textNormal);
     else if (!v[kParamMetroAudio]) NT_drawText(255, 63, "metro off", 8, kNT_textRight, kNT_textNormal);
 
     return false;
@@ -595,15 +737,27 @@ static bool draw(_NT_algorithm* self) {
 // display taps the tempo. Everything else keeps its normal behaviour.
 
 static uint32_t hasCustomUi(_NT_algorithm* self) {
-    return self->v[kParamSource] == metro::kSourceInternal ? (uint32_t)kNT_encoderButtonR : 0u;
+    return self->v[kParamSource] == metro::kSourceInternal ? (uint32_t)(kNT_encoderButtonL | kNT_encoderButtonR) : 0u;
 }
 
 static void customUi(_NT_algorithm* self, const _NT_uiData& data) {
     MetronomeAlgorithm* a = (MetronomeAlgorithm*)self;
     if ((data.controls & kNT_encoderButtonR) && !(data.lastButtons & kNT_encoderButtonR)) a->tapRequests = a->tapRequests + 1;
+    if ((data.controls & kNT_encoderButtonL) && !(data.lastButtons & kNT_encoderButtonL))
+        setParam(self, kParamInternalRun, self->v[kParamInternalRun] ? 0 : 1);  // play / stop
 }
 
 static int parameterString(_NT_algorithm* self, int p, int v, char* buff) {
+    if (p == kParamRecNote) {
+        if (v >= 128) return (int)(appendStr(buff, "Off") - buff);
+        static const char* const names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+        char* q = appendStr(buff, names[v % 12]);
+        q = appendInt(q, v / 12 - 1);
+        q = appendStr(q, " (");
+        q = appendInt(q, v);
+        q = appendStr(q, ")");
+        return (int)(q - buff);
+    }
     if (p != kParamTap) return 0;
     const char* text = self->v[kParamSource] == metro::kSourceInternal ? "turn right = tap" : "internal clock only";
     char* q = appendStr(buff, text);

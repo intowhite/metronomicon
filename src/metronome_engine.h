@@ -35,12 +35,14 @@ static const int32_t kTicksPerQuarter = 24;
 
 enum ClockSource { kSourceCV = 0, kSourceMIDI = 1, kSourceInternal = 2 };
 enum MidiMode { kMidiTransport = 0, kMidiClockOnly = 1 };
-enum CvTransportMode { kCvRun = 0, kCvReset = 1, kCvNone = 2 };
+enum CvTransportMode { kCvRun = 0, kCvReset = 1, kCvNone = 2, kCvToggle = 3 };
 enum CvResolution { kCv24ppqn = 0, kCv4ppqn, kCv2ppqn, kCv1ppqn, kCvBar, kNumCvRes };
 enum Division { kDivBeats = 0, kDiv4, kDiv8, kDiv16 };
 enum BaseClockRes { kBase4 = 0, kBase8, kBase16, kBase24ppqn };
 enum PolyClockRes { kPoly1 = 0, kPoly4, kPoly24 };
 enum ResetMode { kResetCycle = 0, kResetStart = 1 };
+// Held CV levels (gates / stepped CV)
+enum LevelOut { kLvlVelocity = 0, kLvlRun, kLvlCountIn, kLvlRecGate, kNumLevels };
 enum PatTrigMode { kTrigAllHits = 0, kTrigNoGhosts = 1 };
 // MIDI drum voices (one note number each)
 enum MidiVoice {
@@ -48,16 +50,23 @@ enum MidiVoice {
     kNumMidiVoices
 };
 enum ClickSound { kSoundClassic = 0, kSoundSoft = 1, kNumSounds };
-enum Status { kStatusStopped = 0, kStatusWaiting, kStatusAcquiring, kStatusRunning, kStatusLost };
+enum Status { kStatusStopped = 0, kStatusWaiting, kStatusAcquiring, kStatusRunning, kStatusLost, kStatusCountIn };
+enum RecState { kRecIdle = 0, kRecWaiting, kRecRecording, kRecEnding };
+enum RecMode { kRecTrigger = 0, kRecGate = 1 };
 
 // Click voices. 0-2 metronome, 3-4 polyrhythm, 5-6 pattern.
-enum Bank { kClickSub = 0, kClickBeat, kClickDown, kClickPoly, kClickPolyAccent, kClickPatWeak, kClickPatStrong, kNumBanks };
+enum Bank {
+    kClickSub = 0, kClickBeat, kClickDown, kClickPoly, kClickPolyAccent, kClickPatWeak, kClickPatStrong,
+    kClickCount, kClickCountAccent, kNumBanks
+};
 enum LayerId { kLayerMetro = 0, kLayerPoly, kLayerPattern, kNumLayers };
 enum TrigOut {
     kOutBaseClock = 0, kOutBaseReset, kOutPolyClock, kOutPolyReset, kOutPatTrig, kOutPatAccent, kOutPatReset,
-    kOutPatGhost, kNumTrigOuts
+    kOutPatGhost, kOutRecTrig, kNumTrigOuts
 };
-static inline int bankLayer(int b) { return b <= kClickDown ? kLayerMetro : (b <= kClickPolyAccent ? kLayerPoly : kLayerPattern); }
+static inline int bankLayer(int b) {
+    return b <= kClickDown ? kLayerMetro : (b <= kClickPolyAccent ? kLayerPoly : (b <= kClickPatStrong ? kLayerPattern : kLayerMetro));
+}
 
 // ---------------------------------------------------------------- meters
 struct Meter {
@@ -113,7 +122,7 @@ struct Settings {
     int cvResolution = kCv24ppqn;
     int cvTransport = kCvReset;
     float internalBpm = 120.0f;
-    bool internalRun = true;
+    bool play = false;  // internal clock transport (start/stop requests)
     // metronome
     int meter = 0;
     int division = kDivBeats;
@@ -144,20 +153,29 @@ struct Settings {
     // pattern CV
     int patTrigMode = kTrigAllHits;
     // MIDI drum output (independent of the audio switches)
-    bool midiOut = false;
+    bool midiOut = false;  // master switch for all MIDI output
     int midiChannel = 10;
     int midiLayers = 7;  // bit 0 metronome, bit 1 polyrhythm, bit 2 pattern
     int midiNote[kNumMidiVoices] = {76, 77, 42, 56, 75, 75, 56, 75};
+    // count-in, sync and recording
+    int countInBars = 0;        // 0 = off (internal clock only)
+    bool countInMidi = false;   // MIDI count out: send the count as notes
+    bool countInClock = false;  // Count-in clock: false = Wait, true = Run
+    bool midiClockOut = false;  // 24 PPQN clock + Start/Stop (not when following MIDI)
+    bool recArm = false;
+    int recLengthBars = 0;      // 0 = manual (ends on the bar line after disarm/stop)
+    int recMode = kRecTrigger;
+    int recNote = -1;           // MIDI note for record start/stop, -1 = off
 };
 
-struct MidiMsg { uint8_t b0, b1, b2; };
+struct MidiMsg { uint8_t b0, b1, b2, len; };  // len 1 = realtime byte
 
 // Bus pointers for one block (NULL = not assigned).
 struct Outputs {
     float* audio[kNumLayers] = {nullptr, nullptr, nullptr};
     bool replace[kNumLayers] = {false, false, false};
     float* trig[kNumTrigOuts] = {};
-    float* velocity = nullptr;  // pattern velocity CV (held level)
+    float* level[kNumLevels] = {};  // held-level outputs (velocity CV, run / count-in / rec gates)
 };
 
 static inline int32_t cvResolutionTicks(int r, int meter) {
@@ -223,6 +241,8 @@ static const ClickPreset kPresets[kNumSounds][kNumBanks] = {
     /* poly accent    */ {1080.f, 0.0350f, 1650.f, 0.0240f, 0.60f, 0.0004f, 0.08f},
     /* pattern weak   */ {2050.f, 0.0160f, 4700.f, 0.0060f, 0.15f, 0.0003f, 0.05f},  // clave-like
     /* pattern strong */ {2500.f, 0.0280f, 5600.f, 0.0080f, 0.20f, 0.0003f, 0.08f},
+    /* count          */ {2300.f, 0.0050f, 5400.f, 0.0025f, 0.30f, 0.0004f, 0.18f},  // high, short "tick"
+    /* count accent   */ {2900.f, 0.0060f, 6600.f, 0.0030f, 0.30f, 0.0004f, 0.22f},
   },
   {  // Soft: lower, short and dry - more "tock"/thump, less ring
     /* metro sub      */ {1500.f, 0.0030f, 3000.f, 0.0015f, 0.20f, 0.0004f, 0.30f},
@@ -232,6 +252,8 @@ static const ClickPreset kPresets[kNumSounds][kNumBanks] = {
     /* poly accent    */ {650.f, 0.0080f, 1400.f, 0.0045f, 0.30f, 0.0004f, 0.25f},
     /* pattern weak   */ {1200.f, 0.0050f, 2600.f, 0.0020f, 0.20f, 0.0005f, 0.30f},
     /* pattern strong */ {1500.f, 0.0055f, 3200.f, 0.0025f, 0.25f, 0.0005f, 0.35f},
+    /* count          */ {1600.f, 0.0035f, 3300.f, 0.0018f, 0.25f, 0.0004f, 0.30f},
+    /* count accent   */ {1900.f, 0.0040f, 3800.f, 0.0020f, 0.25f, 0.0004f, 0.35f},
   },
 };
 
@@ -483,7 +505,7 @@ public:
             Outputs oo = o;
             for (int l = 0; l < kNumLayers; ++l) if (oo.audio[l]) oo.audio[l] += off;
             for (int k = 0; k < kNumTrigOuts; ++k) if (oo.trig[k]) oo.trig[k] += off;
-            if (oo.velocity) oo.velocity += off;
+            for (int k = 0; k < kNumLevels; ++k) if (oo.level[k]) oo.level[k] += off;
             processChunk(s, clockIn ? clockIn + off : nullptr, transportIn ? transportIn + off : nullptr,
                          tapIn ? tapIn + off : nullptr, oo, m);
             off += m;
@@ -499,6 +521,14 @@ public:
     int polyPulse() const { return displayPoly_; }
     int patternStep() const { return displayStep_; }
     int activePattern() const { return layers_[kLayerPattern].tag; }
+    // internal transport: playing or counting in (a pending quantized stop counts as off)
+    bool transportOn() const { return tstate_ != kTStopped && !stopPending_; }
+    int countBarsLeft() const { return displayCountBars_; }
+    int countBeat() const { return displayCountBeat_; }
+    int recState() const { return recState_; }
+    int recBars() const { return recBars_; }
+    // true once after a take finished: the host should switch Rec arm off
+    bool takeRecDisarm() { bool d = recDisarm_; recDisarm_ = false; return d; }
 
 private:
     static const uint32_t kFifoSize = 64;
@@ -508,7 +538,7 @@ private:
 
     struct SoundEvent { uint16_t offset; uint8_t bank; uint8_t choke; float amp; };
     struct TrigEvent { uint16_t offset; uint8_t out; int32_t len, delay; };
-    struct VelEvent { uint16_t offset; float value; };
+    struct LevelEvent { uint16_t offset; uint8_t which; float value; };
     struct NoteOff { uint32_t due; uint8_t ch, note; };
     enum { kMaxMidi = 96, kMaxNoteOffs = 16 };
 
@@ -527,9 +557,19 @@ private:
     int32_t trigLen_ = 240, resetLead_ = 48;
     SoundEvent snd_[kMaxEvents];
     TrigEvent trg_[kMaxEvents];
-    VelEvent vel_[kMaxEvents];
-    int nVel_ = 0;
-    float velHeld_ = 0;
+    LevelEvent lvl_[kMaxEvents];
+    int nLvl_ = 0;
+    float lvlHeld_[kNumLevels] = {0, 0, 0, 0};
+    // internal transport / count-in / recording
+    enum { kTStopped = 0, kTCountIn, kTPlaying };
+    int tstate_ = kTStopped;
+    bool stopPending_ = false, sessionActive_ = false;
+    int32_t countPos_ = 0, countTicks_ = 0, countBarTicks_ = 96;
+    int countMeter_ = 0;
+    volatile int displayCountBars_ = 0, displayCountBeat_ = -1;
+    int recState_ = kRecIdle, recBars_ = 0;
+    bool recDisarm_ = false, recNoteHeld_ = false;
+    uint8_t recNoteCh_ = 0, recNoteNum_ = 0;
     MidiMsg midi_[kMaxMidi];
     int nMidi_ = 0;
     NoteOff offs_[kMaxNoteOffs];
@@ -610,11 +650,11 @@ private:
     // ---------------- block processing ----------------
     void processChunk(const Settings& s, const float* clockIn, const float* transportIn, const float* tapIn,
                       const Outputs& o, int n) {
-        applySettings(s);
-        out_ = o;
         const uint32_t t0 = now_;
         blockStart_ = t0;
-        nSnd_ = nTrg_ = nVel_ = 0;
+        nSnd_ = nTrg_ = nLvl_ = 0;
+        out_ = o;
+        applySettings(s);
 
         while (fifoRead_ != fifoWrite_) {
             uint32_t e = fifo_[fifoRead_ & (kFifoSize - 1)];
@@ -638,7 +678,7 @@ private:
                 if (scanTransport) {
                     const float r = transportIn[i];
                     if (!trHigh_) { if (r > 1.0f) { trHigh_ = true; onTransportRise(t); } }
-                    else if (r < 0.5f) { trHigh_ = false; if (cur_.cvTransport == kCvRun) onRunFall(); }
+                    else if (r < 0.5f) { trHigh_ = false; onTransportFall(t); }
                 }
                 if (scanTap) {
                     const float r = tapIn[i];
@@ -668,7 +708,7 @@ private:
                 if (anyDue_ && since(t, minDue_) >= 0) runScheduled(t);
             }
         }
-        if (cv && haveEdge_ && since(t0 + (uint32_t)n, lastEdgeTime_) > cvTimeout_) onCvLost();
+        if (cv && haveEdge_ && since(t0 + (uint32_t)n, lastEdgeTime_) > cvTimeout_) onCvLost(t0 + (uint32_t)n - 1);
 
         flushNoteOffs(t0 + (uint32_t)n, false);
 
@@ -683,7 +723,7 @@ private:
         clkHigh_ = c > 1.0f;
         trHigh_ = r > 1.0f;
         tapHigh_ = tp > 1.0f;
-        if (pulseSource() && cur_.cvTransport == kCvRun && trHigh_ && !running_) {
+        if (cur_.source == kSourceCV && cur_.cvTransport == kCvRun && trHigh_ && !running_) {
             // Gate already high: playing, but the bar position is unknowable.
             running_ = true;
             armed_ = true;
@@ -691,18 +731,25 @@ private:
         }
     }
 
-    void renderVelocity(float* dst, int n) {
-        if (!dst) return;
-        int pos = 0;
-        for (int e = 0; e <= nVel_; ++e) {
-            int at = e < nVel_ ? vel_[e].offset : n;
-            for (; pos < at; ++pos) dst[pos] = velHeld_;
-            if (e < nVel_) velHeld_ = vel_[e].value;
+    void setLevel(int which, uint32_t t, float v) {
+        if (nLvl_ < kMaxEvents) lvl_[nLvl_++] = {(uint16_t)(t - blockStart_), (uint8_t)which, v};
+        else lvlHeld_[which] = v;
+    }
+    void renderLevels(const Outputs& o, int n) {
+        for (int k = 0; k < kNumLevels; ++k) {
+            float* dst = o.level[k];
+            int pos = 0;
+            for (int e = 0; e <= nLvl_; ++e) {
+                if (e < nLvl_ && lvl_[e].which != k) continue;
+                int at = e < nLvl_ ? lvl_[e].offset : n;
+                if (dst) for (; pos < at; ++pos) dst[pos] = lvlHeld_[k];
+                if (e < nLvl_) lvlHeld_[k] = lvl_[e].value;
+            }
         }
     }
 
     void render(const Outputs& o, int n) {
-        renderVelocity(o.velocity, n);
+        renderLevels(o, n);
         // voices
         bool layerActive[kNumLayers] = {false, false, false};
         for (int b = 0; b < kNumBanks; ++b) {
@@ -729,7 +776,7 @@ private:
 
         // gains + outputs (layers sharing a bus are summed before writing)
         float target[kNumLayers];
-        target[kLayerMetro] = (cur_.mute || !cur_.metroAudio) ? 0.0f : cur_.master;
+        target[kLayerMetro] = (cur_.mute || (!cur_.metroAudio && tstate_ != kTCountIn)) ? 0.0f : cur_.master;
         target[kLayerPoly] = (cur_.mute || !cur_.polyEnable || !cur_.polyAudio) ? 0.0f : cur_.master;
         target[kLayerPattern] = (cur_.mute || !cur_.patEnable || !cur_.patAudio) ? 0.0f : cur_.master;
         const float kVolts = 5.0f;
@@ -837,7 +884,9 @@ private:
         const bool patOn = s.patEnable && !cur_.patEnable;
         const bool polyCfg = s.polyX != cur_.polyX || s.polyY != cur_.polyY || s.polyClockRes != cur_.polyClockRes;
         const bool patCfg = s.pattern != cur_.pattern;
-        const bool runChange = s.internalRun != cur_.internalRun;
+        const bool playEdge = first ? s.play : (s.play != cur_.play);
+        const bool armOn = s.recArm && (first || !cur_.recArm);
+        const bool armOff = !first && !s.recArm && cur_.recArm;
         if (nOffs_ && (!s.midiOut || s.midiChannel != cur_.midiChannel)) flushNoteOffs(now_, true);
         cur_ = s;
         haveSettings_ = true;
@@ -875,13 +924,23 @@ private:
         intPeriod_ = 60.0 * (double)sr_ / ((double)bpm * 24.0);
 
         if (resync) resetSync();
-        if (cur_.source == kSourceInternal && (resync || runChange)) {
-            if (s.internalRun) startInternal();
-            else stopInternal();
+        if (cur_.source == kSourceInternal && playEdge) {
+            if (s.play) requestStart(now_);
+            else requestStop(now_);
+        }
+        if (armOn && recState_ == kRecIdle) recState_ = kRecWaiting;  // starts on the next bar line
+        if (armOff) {
+            if (recState_ == kRecWaiting) recState_ = kRecIdle;
+            else if (recState_ == kRecRecording) recState_ = kRecEnding;  // ends on the next bar line
         }
     }
 
     void resetSync() {
+        if (sessionActive_ || recState_ == kRecRecording || recState_ == kRecEnding) transportStopped(now_);
+        if (tstate_ == kTCountIn) setLevel(kLvlCountIn, now_, 0.0f);
+        tstate_ = kTStopped;
+        stopPending_ = false;
+        displayCountBars_ = 0;
         running_ = armed_ = lost_ = posKnown_ = pendingReset_ = sessionStartPending_ = false;
         origin_ = barStart_ = 0;
         activeMeter_ = pendingMeter_;
@@ -908,20 +967,56 @@ private:
     }
 
     // ---------------- internal clock & tap ----------------
-    void startInternal() {
+    // ---- internal transport: Stopped -> (Count-in) -> Playing -> Stopped ----
+    void requestStart(uint32_t t) {
+        if (cur_.source != kSourceInternal) return;
+        if (tstate_ != kTStopped) { stopPending_ = false; return; }  // play again cancels a pending stop
         intActive_ = true;
-        intNext_ = now_;  // first tick at the start of this block
+        intNext_ = t;
         intFrac_ = 0;
-        if (cur_.cvTransport == kCvRun && trHigh_ && !running_) {
-            running_ = armed_ = posKnown_ = true;  // gate already high: start at the next tick
+        tickPeriod_ = (float)intPeriod_;
+        tickPeriodValid_ = true;
+        updateBpm(60.0f * sr_ / (24.0f * tickPeriod_), true);
+        stopPending_ = false;
+        haveEdge_ = false;
+        const int bars = clampi(cur_.countInBars, 0, 4);
+        if (bars > 0) {
+            tstate_ = kTCountIn;
+            countMeter_ = pendingMeter_;
+            countBarTicks_ = kMeters[countMeter_].barTicks;
+            countTicks_ = bars * countBarTicks_;
+            countPos_ = 0;
+            displayCountBars_ = bars;
+            displayCountBeat_ = -1;
+            setLevel(kLvlCountIn, t, 5.0f);
+        } else {
+            beginPlaying();
         }
     }
-    void stopInternal() {
+    void beginPlaying() {
+        tstate_ = kTPlaying;
+        running_ = armed_ = posKnown_ = true;  // the next tick is bar 1
+        pendingReset_ = false;
+    }
+    void requestStop(uint32_t t) {
+        if (cur_.source != kSourceInternal || tstate_ == kTStopped) return;
+        if (tstate_ == kTPlaying && (recState_ == kRecRecording || recState_ == kRecEnding)) {
+            stopPending_ = true;  // finish the take on the next bar line
+            return;
+        }
+        stopNow(t);
+    }
+    void stopNow(uint32_t t) {
+        if (tstate_ == kTCountIn) setLevel(kLvlCountIn, t, 0.0f);
+        tstate_ = kTStopped;
+        stopPending_ = false;
         intActive_ = false;
         running_ = armed_ = lost_ = false;
         haveEdge_ = false;
         clearDues();
         displayBeat_ = displayPoly_ = displayStep_ = -1;
+        displayCountBars_ = 0;
+        transportStopped(t);
     }
     void internalTick(uint32_t t) {
         // advance the tick clock with a fractional accumulator: no drift
@@ -929,7 +1024,103 @@ private:
         uint32_t whole = (uint32_t)adv;
         intFrac_ = adv - (double)whole;
         intNext_ = t + whole;
-        onPulse(t, (float)intPeriod_);
+        if (tstate_ == kTCountIn) countTick(t);
+        else onPulse(t, (float)intPeriod_);
+    }
+    void countTick(uint32_t t) {
+        if (countPos_ >= countTicks_) {  // count finished: this tick is bar 1
+            setLevel(kLvlCountIn, t, 0.0f);
+            displayCountBars_ = 0;
+            beginPlaying();
+            onPulse(t, (float)intPeriod_);
+            return;
+        }
+        const Meter& m = kMeters[countMeter_];
+        const int32_t rel = countPos_ % countBarTicks_;
+        for (int i = 0; i < m.numBeats; ++i) {
+            if (m.beat[i] == rel) {
+                countClick(t, i == 0);
+                displayCountBeat_ = i;
+                displayCountBars_ = (countTicks_ - countPos_ + countBarTicks_ - 1) / countBarTicks_;
+                break;
+            }
+        }
+        if (cur_.countInClock) {
+            if (sendsMidiClock()) pushRealtime(0xF8);
+            if (out_.trig[kOutBaseClock]) {
+                int32_t bt = baseClockTicks(cur_.baseClockRes);
+                if (countPos_ % bt == 0) fireTrig(kOutBaseClock, t, clockLen((float)bt), 0);
+            }
+        }
+        ++countPos_;
+    }
+    void countClick(uint32_t t, bool accent) {
+        const int bank = accent ? kClickCountAccent : kClickCount;
+        const float lev = accent ? 0.9f : 0.7f;
+#ifdef METRO_ENGINE_TEST
+        if (onClick) onClick(onClickCtx, t, bank, countPos_, true);
+#endif
+        if (cur_.countInMidi && cur_.midiOut) midiNote(bank, t, lev, false);
+        if (cur_.mute) return;
+        banks_[bank].lastTrigger = t;
+        banks_[bank].everTriggered = true;
+        if (nSnd_ < kMaxEvents) snd_[nSnd_++] = {(uint16_t)(t - blockStart_), (uint8_t)bank, 0, lev};
+    }
+
+    // Any source: the transport has stopped (Stop, RUN low, clock loss, source change).
+    void transportStopped(uint32_t t) {
+        if (sessionActive_) {
+            if (sendsMidiClock()) pushRealtime(0xFC);
+            setLevel(kLvlRun, t, 0.0f);
+        }
+        sessionActive_ = false;
+        endRec(t);
+    }
+
+    // ---- recording: start / end on bar lines ----
+    void recNoteOn(uint32_t t, bool hold) {
+        if (cur_.recNote < 0 || !cur_.midiOut) return;
+        const uint8_t ch = (uint8_t)(clampi(cur_.midiChannel, 1, 16) - 1);
+        const uint8_t note = (uint8_t)clampi(cur_.recNote, 0, 127);
+        pushMidi((uint8_t)(0x90 | ch), note, 127);
+        if (hold) {
+            recNoteHeld_ = true;
+            recNoteCh_ = ch;
+            recNoteNum_ = note;
+        } else if (nOffs_ < kMaxNoteOffs) {
+            offs_[nOffs_++] = {t + (uint32_t)(0.015f * sr_), ch, note};
+        } else {
+            pushMidi((uint8_t)(0x80 | ch), note, 0);
+        }
+    }
+    void startRec(uint32_t t) {
+        recState_ = kRecRecording;
+        recBars_ = 0;
+        if (cur_.recMode == kRecGate) setLevel(kLvlRecGate, t, 5.0f);
+        else fireTrig(kOutRecTrig, t, trigLen_, 0);
+        recNoteOn(t, cur_.recMode == kRecGate);
+    }
+    void endRec(uint32_t t) {
+        if (recState_ != kRecRecording && recState_ != kRecEnding) return;
+        recState_ = kRecIdle;
+        if (cur_.recMode == kRecGate) setLevel(kLvlRecGate, t, 0.0f);
+        else fireTrig(kOutRecTrig, t, trigLen_, 0);
+        if (recNoteHeld_) {
+            pushMidi((uint8_t)(0x80 | recNoteCh_), recNoteNum_, 0);
+            recNoteHeld_ = false;
+        } else if (cur_.recMode == kRecTrigger) {
+            recNoteOn(t, false);
+        }
+        recDisarm_ = true;
+    }
+    void recBarLine(uint32_t t) {
+        if (recState_ == kRecRecording) {
+            ++recBars_;
+            if (cur_.recLengthBars > 0 && recBars_ >= cur_.recLengthBars) endRec(t);
+        } else if (recState_ == kRecEnding) {
+            endRec(t);
+        }
+        if (recState_ == kRecWaiting) startRec(t);
     }
 
     void tap(uint32_t t) {
@@ -1020,12 +1211,17 @@ private:
         if (nSnd_ < kMaxEvents) snd_[nSnd_++] = {(uint16_t)(t - blockStart_), (uint8_t)bank, 0, level};
     }
     void pushMidi(uint8_t b0, uint8_t b1, uint8_t b2) {
-        if (nMidi_ < kMaxMidi) midi_[nMidi_++] = {b0, b1, b2};
+        if (nMidi_ < kMaxMidi) midi_[nMidi_++] = {b0, b1, b2, 3};
     }
+    void pushRealtime(uint8_t b) {
+        if (nMidi_ < kMaxMidi) midi_[nMidi_++] = {b, 0, 0, 1};
+    }
+    bool sendsMidiClock() const { return cur_.midiOut && cur_.midiClockOut && cur_.source != kSourceMIDI; }
     void midiNote(int bank, uint32_t t, float level, bool ghost) {
         static const uint8_t voiceOf[kNumBanks] = {kVoiceSub,        kVoiceBeat,    kVoiceDown,     kVoicePoly,
-                                                   kVoicePolyAccent, kVoicePattern, kVoicePatAccent};
-        const bool accent = bank == kClickPolyAccent || bank == kClickPatStrong;
+                                                   kVoicePolyAccent, kVoicePattern, kVoicePatAccent,
+                                                   kVoiceBeat,       kVoiceDown};
+        const bool accent = bank == kClickPolyAccent || bank == kClickPatStrong || bank == kClickCountAccent;
         const uint8_t ch = (uint8_t)(clampi(cur_.midiChannel, 1, 16) - 1);
         const int voice = (ghost && bank == kClickPatWeak) ? (int)kVoicePatGhost : (int)voiceOf[bank];
         const uint8_t note = (uint8_t)clampi(cur_.midiNote[voice], 0, 127);
@@ -1060,15 +1256,23 @@ private:
     void fireStartResets(uint32_t t) {
         if (!sessionStartPending_) return;
         sessionStartPending_ = false;
+        if (sendsMidiClock()) {
+            if (sessionActive_) pushRealtime(0xFC);  // restart (reset while playing): Stop, then Start
+            pushRealtime(0xFA);
+        }
+        sessionActive_ = true;
+        setLevel(kLvlRun, t, 5.0f);
         if (cur_.baseResetMode == kResetStart) fireTrig(kOutBaseReset, t, trigLen_, 0);
         if (cur_.polyEnable && cur_.polyResetMode == kResetStart) fireTrig(kOutPolyReset, t, trigLen_, 0);
         if (cur_.patEnable && cur_.patResetMode == kResetStart) fireTrig(kOutPatReset, t, trigLen_, 0);
     }
 
     void metroEvent(int32_t tick, uint32_t t, bool audible) {
+        if (sendsMidiClock()) pushRealtime(0xF8);
         advanceBar(tick);
         const Meter& m = kMeters[activeMeter_];
         const int32_t rel = tick - barStart_;
+        if (rel == 0 && posKnown_ && !relabeling_) recBarLine(t);
         int beatIdx = -1;
         for (int i = 0; i < m.numBeats; ++i)
             if (m.beat[i] == rel) { beatIdx = i; break; }
@@ -1124,8 +1328,7 @@ private:
             float lev = cur_.patLevel * (ghost ? 0.4f : 1.0f);
             playClick(strong ? kClickPatStrong : kClickPatWeak, t, L.cycleStart, lev, audible, cur_.patAudio, ghost);
             // velocity CV steps at the hit (before any delayed trigger): accent / hit / ghost
-            if (out_.velocity && nVel_ < kMaxEvents)
-                vel_[nVel_++] = {(uint16_t)(t - blockStart_), accent ? 5.0f : (ghost ? 1.5f : 3.5f)};
+            if (out_.level[kLvlVelocity]) setLevel(kLvlVelocity, t, accent ? 5.0f : (ghost ? 1.5f : 3.5f));
             if (!(ghost && cur_.patTrigMode == kTrigNoGhosts)) fireTrig(kOutPatTrig, t, trigLen_, lead);
             if (accent) fireTrig(kOutPatAccent, t, trigLen_, lead);
             if (ghost) fireTrig(kOutPatGhost, t, trigLen_, lead);
@@ -1166,6 +1369,10 @@ private:
     // until the next one (S ticks later) are timed from spanTime.
     void clockEvent(int32_t T, uint32_t tFire, uint32_t spanTime, int32_t S) {
         if (!clicksEnabled()) return;
+        if (stopPending_) {
+            advanceBar(T);
+            if (T == barStart_) { stopNow(tFire); return; }  // quantized stop: end exactly on the bar line
+        }
         fireStartResets(tFire);
         for (int l = 0; l < kNumLayers; ++l) {
             Layer& L = layers_[l];
@@ -1235,8 +1442,23 @@ private:
     }
 
     void onTransportRise(uint32_t t) {
-        if (cur_.cvTransport == kCvRun) onRunRise(t);
-        else if (cur_.cvTransport == kCvReset) onResetTrigger(t);
+        const int mode = cur_.cvTransport;
+        if (cur_.source == kSourceInternal) {
+            if (mode == kCvRun) requestStart(t);
+            else if (mode == kCvToggle) {
+                if (tstate_ == kTStopped || stopPending_) requestStart(t);
+                else requestStop(t);
+            } else if (mode == kCvReset) onResetTrigger(t);
+            return;
+        }
+        if (mode == kCvRun) onRunRise(t);
+        else if (mode == kCvToggle) { if (running_) onRunFall(t); else onRunRise(t); }
+        else if (mode == kCvReset) onResetTrigger(t);
+    }
+    void onTransportFall(uint32_t t) {
+        if (cur_.cvTransport != kCvRun) return;
+        if (cur_.source == kSourceInternal) requestStop(t);
+        else onRunFall(t);
     }
 
     void onRunRise(uint32_t t) {
@@ -1251,10 +1473,11 @@ private:
         }
     }
 
-    void onRunFall() {
+    void onRunFall(uint32_t t) {
         running_ = armed_ = lost_ = false;
         displayBeat_ = displayPoly_ = displayStep_ = -1;
         clearDues();
+        transportStopped(t);
     }
 
     void onResetTrigger(uint32_t t) {
@@ -1294,7 +1517,10 @@ private:
         const int32_t tick = cvTick_;
         lastEdgeTick_ = tick;
         bool startNow = false;
-        if (cur_.cvTransport == kCvRun) {
+        if (cur_.source == kSourceInternal) {
+            if (running_ && armed_) { armed_ = false; startNow = true; }
+            else if (running_ && pendingReset_) { pendingReset_ = false; startNow = true; }
+        } else if (cur_.cvTransport == kCvRun || cur_.cvTransport == kCvToggle) {
             if (running_ && armed_) {
                 armed_ = false;
                 startNow = true;
@@ -1322,14 +1548,15 @@ private:
         cvTick_ = tick + S;
     }
 
-    void onCvLost() {
+    void onCvLost(uint32_t t) {
         haveEdge_ = tickPeriodValid_ = false;
         clearDues();
         cvTimeout_ = initialCvTimeout();
         bpmRaw_ = 0;
         bpmShown_ = 0;
         if (running_) lost_ = true;
-        if (cur_.cvTransport != kCvRun) {
+        if (cur_.cvTransport != kCvRun && cur_.cvTransport != kCvToggle) {
+            if (running_) transportStopped(t);
             running_ = false;
             displayBeat_ = displayPoly_ = displayStep_ = -1;
         }
@@ -1357,6 +1584,7 @@ private:
                 running_ = armed_ = lost_ = false;
                 displayBeat_ = displayPoly_ = displayStep_ = -1;
                 clearDues();
+                transportStopped(t);
                 break;
             case 0xF2: {
                 int32_t spp = (int32_t)(((e >> 8) & 0x7F) | (((e >> 16) & 0x7F) << 7));
@@ -1418,6 +1646,7 @@ private:
         bpmShown_ = 0;
         if (running_) lost_ = true;
         if (cur_.midiMode == kMidiClockOnly) {
+            if (running_) transportStopped(t);
             running_ = false;
             displayBeat_ = displayPoly_ = displayStep_ = -1;
         }
@@ -1436,11 +1665,11 @@ private:
 
     void updateStatus() {
         int s;
-        if (cur_.source == kSourceInternal && !intActive_) {
-            s = kStatusStopped;
+        if (cur_.source == kSourceInternal) {
+            s = tstate_ == kTCountIn ? kStatusCountIn : (tstate_ == kTPlaying ? kStatusRunning : kStatusStopped);
         } else if (pulseSource()) {
-            if (cur_.cvTransport == kCvRun) {
-                if (!trHigh_) s = kStatusStopped;
+            if (cur_.cvTransport == kCvRun || cur_.cvTransport == kCvToggle) {
+                if (cur_.cvTransport == kCvRun ? !trHigh_ : !running_) s = kStatusStopped;
                 else if (lost_) s = kStatusLost;
                 else if (armed_ || !haveEdge_) s = kStatusWaiting;
                 else if (!tickPeriodValid_ || !posKnown_) s = kStatusAcquiring;

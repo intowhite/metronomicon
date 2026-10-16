@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.9
+- Removed *Count-in out*.
+- *Clock in count* is now **Count-in clock**: Wait (default) / Run.
+- *Count-in MIDI* is now **MIDI count out**, on the Output page with the other MIDI settings.
+- **MIDI out** is the master switch for all MIDI (notes, clock, count, rec note). Turning on
+  *MIDI clock out* or a *Rec MIDI note* switches MIDI out on and sets *MIDI layers* to the
+  new **None** option, so you get clock without drum notes.
+- *Play* also appears on the Clock & Transport page when the clock source is Internal.
+- *MIDI clock out* also appears on the Count-in & Rec page; while it's on, *MIDI out dest*
+  appears there too.
+
+## 1.8
+- **Transport** for the internal clock: *Play* (always stopped after loading), left-encoder
+  press = play/stop, CV transport *TOGGLE* mode (one trigger = play/stop); a RUN gate also
+  plays/stops.
+- **Count-in**: Off / 1–4 bars with its own count sound (heard even with Metro audio off);
+  *Count-in MIDI* sends the count as notes; *Clock in count* runs MIDI/base clock during it.
+- **MIDI clock out**: 24 PPQN clock plus Start / Stop when Metronomicon is the master
+  (internal or CV clock).
+- **Recording**: *Rec arm*, *Rec length* (Manual or 1–16 bars), *Rec out* (Trigger or Gate),
+  *Rec MIDI note*. Takes start and end exactly on bar lines; stop while recording is
+  quantized to the next bar line; arming while playing punches in on the next bar.
+- **Run out** and **Count-in out** gate outputs.
+
 ## 1.7
 - Renamed to **Metronomicon** (plug-in ID unchanged, so presets still load); the build
   output is now `metronomicon.o` — delete the old `metronome.o` from the SD card.

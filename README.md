@@ -17,6 +17,8 @@ on quantisation: patch the clock in, press play, hear clicks that sit exactly on
 - CV clock at 24, 4, 2 or 1 PPQN, or one pulse per bar
 - CV transport input: RESET (default), RUN gate, or none
 - Internal tempo (20–300 BPM) with tap tempo: right-encoder press, turning the Tap parameter, a CV input, or a mapped gate/MIDI note
+- As master: play/stop on the left encoder, a mappable Play parameter, a RUN gate or a toggle trigger;
+  MIDI clock + Start/Stop out and a Run gate output
 - Clicks land on the exact sample of a CV edge; subdivisions between clock pulses are interpolated and
   re-anchored on every pulse, so there's no drift and nothing keeps running on a stale tempo
 - Clock-loss detection and clear status: stopped / waiting / acquiring / running / clock lost
@@ -26,6 +28,12 @@ on quantisation: patch the clock in, press play, hear clicks that sit exactly on
   (6/8 = two dotted quarters, 7/8 = 2+2+3…)
 - Click on beats, 1/4, 1/8 or 1/16 with distinct downbeat / beat / subdivision sounds and levels
 - Time signature changes land on the next bar line
+
+**Count-in & recording**
+- Count-in of 1–4 bars with its own count sound; optionally sent as MIDI notes, with clock waiting for bar 1 or running through the count
+- Record arming for samplers and loopers: *Rec out* trigger or gate plus a MIDI note, exactly on bar lines
+- Manual (open-ended) takes end on the bar line after you stop or disarm; or fixed 1/2/4/8/16-bar takes;
+  arm while playing to punch in on the next bar
 
 **Polyrhythm**
 - Any X:Y from 1–16 against Y quarter notes, plus presets (3:2, 2:3, 3:4, 4:3, 6:4, 5:4, 4:5, 5:3, 7:4, 3:8)
@@ -62,7 +70,7 @@ Requires firmware **1.18** or newer (plug-in API v13).
 |---|---|---|
 | CV (Hermod+) | CLOCK OUT (24 PPQN) → input 1, RESET OUT → input 2 | Clock source CV, CV clock res 24 PPQN, CV transport RESET (or RUN if your sequencer sends a run gate) |
 | MIDI | sequencer MIDI out → NT MIDI in (clock + transport) | Clock source MIDI |
-| Internal | — | Clock source Internal, set BPM or tap the right encoder |
+| Internal | — | Clock source Internal, set BPM or tap the right encoder, press the left encoder to play/stop |
 
 Full parameter reference, timing details and pattern notation: **[docs/MANUAL.md](docs/MANUAL.md)**.
 

@@ -33,7 +33,7 @@ struct Click {
 };
 struct Interval { uint64_t start, end; };
 struct MidiEv { double t; uint8_t b0, b1, b2; bool msg; };
-struct MidiOutEv { uint64_t t; uint8_t b0, b1, b2; };
+struct MidiOutEv { uint64_t t; uint8_t b0, b1, b2, len; };
 
 struct Sim {
     Engine e;
@@ -50,6 +50,8 @@ struct Sim {
     std::vector<MidiOutEv> midiOut;
     bool logVel = false;
     std::vector<float> velLog;
+    bool logLevel[kNumLevels] = {};
+    std::vector<float> levelLog[kNumLevels];
     bool trigEnabled[kNumTrigOuts] = {};
     std::vector<float> trigLog[kNumTrigOuts];
     int audioBus[kNumLayers] = {0, 0, 0};            // all layers -> bus A by default
@@ -107,11 +109,16 @@ struct Sim {
                 o.replace[l] = replace[l];
             }
             for (int k = 0; k < kNumTrigOuts; ++k) o.trig[k] = trigEnabled[k] ? tb[k].data() : nullptr;
-            o.velocity = logVel ? vb.data() : nullptr;
+            o.level[kLvlVelocity] = logVel ? vb.data() : nullptr;
+            static std::vector<float> lb[kNumLevels];
+            for (int k = 1; k < kNumLevels; ++k) { lb[k].resize(block); o.level[k] = logLevel[k] ? lb[k].data() : nullptr; }
             e.process(s, c.data(), g.data(), o, block, taps.empty() ? nullptr : tp.data());
             for (int k = 0; k < e.midiCount(); ++k)
-                midiOut.push_back({now, e.midiMessages()[k].b0, e.midiMessages()[k].b1, e.midiMessages()[k].b2});
+                midiOut.push_back({now, e.midiMessages()[k].b0, e.midiMessages()[k].b1, e.midiMessages()[k].b2,
+                                   e.midiMessages()[k].len});
             if (logVel) velLog.insert(velLog.end(), vb.begin(), vb.end());
+            for (int k = 1; k < kNumLevels; ++k)
+                if (logLevel[k]) levelLog[k].insert(levelLog[k].end(), o.level[k], o.level[k] + block);
             for (int i = 0; i < block; ++i) {
                 double a = std::fabs(bus[0][i]);
                 if (!(bus[0][i] == bus[0][i])) peak = 1e9;
@@ -881,6 +888,7 @@ static void testInternalClock(double bpm) {
     std::printf("  Internal clock %.1f BPM for 10 min: exact spacing, no drift\n", bpm);
     Sim sim(32);
     sim.s.source = kSourceInternal;
+    sim.s.play = true;
     sim.s.cvTransport = kCvReset;
     sim.s.internalBpm = (float)bpm;
     sim.s.division = kDiv16;
@@ -895,17 +903,18 @@ static void testInternalClock(double bpm) {
 }
 
 static void testInternalTransport() {
-    std::printf("  Internal clock: Run stop/play, RESET input restarts the bar\n");
+    std::printf("  Internal clock: Play stop/start, RESET input restarts the bar\n");
     Sim sim;
     sim.s.source = kSourceInternal;
+    sim.s.play = true;
     sim.s.cvTransport = kCvReset;
     sim.s.internalBpm = 120;
     sim.runUntil(24000 * 2 + 100);
-    sim.s.internalRun = false;
+    sim.s.play = false;
     sim.runUntil(24000 * 10);
     size_t stopped = sim.metro().size();
-    CHECK(stopped == 3 && sim.e.status() == kStatusStopped, "stops when Run = Stop (%zu clicks)", stopped);
-    sim.s.internalRun = true;
+    CHECK(stopped == 3 && sim.e.status() == kStatusStopped, "stops when Play = Stop (%zu clicks)", stopped);
+    sim.s.play = true;
     sim.runUntil(24000 * 12);
     auto c = sim.metro();
     CHECK(c.size() > stopped && c[stopped].type == kClickDown && c[stopped].t == 24000 * 10, "Play restarts at beat 1");
@@ -922,6 +931,7 @@ static void testTapTempo() {
     std::printf("  Tap tempo from a CV input and from the Tap parameter\n");
     Sim sim;
     sim.s.source = kSourceInternal;
+    sim.s.play = true;
     sim.s.cvTransport = kCvReset;
     sim.s.internalBpm = 90;
     for (int i = 0; i < 4; ++i) sim.taps.push_back({(uint64_t)(10000 + i * 24000), (uint64_t)(10000 + i * 24000 + 240)});
@@ -940,6 +950,7 @@ static void testTapTempo() {
 
     Sim p;
     p.s.source = kSourceInternal;
+    p.s.play = true;
     p.s.cvTransport = kCvReset;
     p.runUntil(1000);
     for (int i = 0; i < 3; ++i) { p.e.tapNow(); p.runUntil(p.now + 32000); }
@@ -1073,8 +1084,253 @@ static void testMidiAccentGhostNotes() {
     CHECK(pat == want, "7/8 Xgxgxgg -> accent 71, ghost 72, hit 70 (%zu notes)", pat.size());
 }
 
+// ================================================================== v1.8: transport, count-in, recording
+
+static std::vector<Click> banksOnly(const Sim& sim, int b0, int b1) {
+    std::vector<Click> r;
+    for (auto& c : sim.all) if (c.type >= b0 && c.type <= b1) r.push_back(c);
+    return r;
+}
+static std::vector<MidiOutEv> realtime(const Sim& sim) {
+    std::vector<MidiOutEv> r;
+    for (auto& m : sim.midiOut) if (m.len == 1) r.push_back(m);
+    return r;
+}
+static Sim* internalSim(int countBars) {
+    Sim* sim = new Sim();
+    sim->s.source = kSourceInternal;
+    sim->s.cvTransport = kCvReset;
+    sim->s.internalBpm = 120;
+    sim->s.countInBars = countBars;
+    return sim;
+}
+static uint64_t firstHigh(const std::vector<float>& v, uint64_t from = 0) {
+    for (uint64_t i = from; i < v.size(); ++i) if (v[i] > 2.5f) return i;
+    return (uint64_t)-1;
+}
+static uint64_t firstLow(const std::vector<float>& v, uint64_t from) {
+    for (uint64_t i = from; i < v.size(); ++i) if (v[i] < 2.5f) return i;
+    return (uint64_t)-1;
+}
+
+static void testCountIn() {
+    std::printf("  Count-in: 1 bar of count clicks, then bar 1 with gates, resets and MIDI Start\n");
+    Sim& sim = *internalSim(1);
+    sim.s.midiClockOut = sim.s.midiOut = true;
+    sim.logLevel[kLvlRun] = sim.logLevel[kLvlCountIn] = true;
+    sim.trigEnabled[kOutBaseClock] = sim.trigEnabled[kOutBaseReset] = true;
+    sim.runUntil(1000);
+    CHECK(sim.e.status() == kStatusStopped && sim.all.empty(), "stopped until Play");
+    sim.s.play = true;
+    const uint64_t T0 = sim.now;
+    sim.runUntil(T0 + 96000 * 2 + 100);
+    auto cnt = banksOnly(sim, kClickCount, kClickCountAccent);
+    bool ok = cnt.size() == 4;
+    for (size_t i = 0; ok && i < 4; ++i) ok = cnt[i].t == T0 + i * 24000 && (cnt[i].type == kClickCountAccent) == (i == 0);
+    CHECK(ok, "4 count clicks on the beats, first accented (%zu)", cnt.size());
+    auto m = sim.metro();
+    CHECK(!m.empty() && m[0].t == T0 + 96000 && m[0].type == kClickDown, "bar 1 downbeat right after the count");
+    CHECK(firstHigh(sim.levelLog[kLvlRun]) == T0 + 96000, "Run out goes high on bar 1");
+    CHECK(firstHigh(sim.levelLog[kLvlCountIn]) == T0 && firstLow(sim.levelLog[kLvlCountIn], T0) == T0 + 96000,
+          "Count-in out high exactly during the count");
+    auto ck = sim.edges(kOutBaseClock), rs = sim.edges(kOutBaseReset);
+    CHECK(!ck.empty() && ck[0] >= T0 + 96000 && !rs.empty() && rs[0] == T0 + 96000, "no CV clock/reset during the count");
+    auto rt = realtime(sim);
+    ok = !rt.empty() && rt[0].b0 == 0xFA && rt[0].t <= T0 + 96000 && rt[0].t + sim.block > T0 + 96000;
+    int clocks = 0;
+    for (auto& r : rt) if (r.b0 == 0xF8) ++clocks;
+    CHECK(ok, "MIDI Start first, in the block of bar 1");
+    CHECK(rt.size() > 1 && rt[1].b0 == 0xF8 && clocks == 96 * 2 / 2 + 1, "24 MIDI clocks per beat after Start (%d)", clocks);
+    delete &sim;
+
+    Sim& c2 = *internalSim(2);
+    c2.s.midiClockOut = c2.s.countInClock = c2.s.midiOut = true;
+    c2.s.countInMidi = true;
+    c2.s.play = true;
+    c2.runUntil(96000 * 3);
+    rt = realtime(c2);
+    int before = 0;
+    size_t i = 0;
+    for (; i < rt.size() && rt[i].b0 != 0xFA; ++i) if (rt[i].b0 == 0xF8) ++before;
+    CHECK(before == 192 && i < rt.size() && i + 1 < rt.size() && rt[i + 1].b0 == 0xF8,
+          "Clock in count-in: 192 clocks during 2 bars, then Start + clock (%d)", before);
+    std::vector<int> notes;
+    for (auto& mm : c2.midiOut) if ((mm.b0 & 0xF0) == 0x90 && mm.t < 192000) notes.push_back(mm.b1);
+    CHECK(notes.size() == 8 && notes[0] == 76 && notes[1] == 77 && notes[4] == 76, "Count-in MIDI: 8 count notes (%zu)",
+          notes.size());
+    delete &c2;
+
+    Sim& c3 = *internalSim(4);  // 6/8 counts two dotted-quarter beats per bar
+    c3.s.meter = 2;
+    c3.s.play = true;
+    c3.runUntil(72000 * 4 + 100);
+    cnt = banksOnly(c3, kClickCount, kClickCountAccent);
+    CHECK(cnt.size() == 8 && cnt[1].t - cnt[0].t == 36000 && c3.metro().size() == 1, "6/8 count-in: 2 clicks per bar");
+    delete &c3;
+}
+
+static void testCountInCancel() {
+    std::printf("  Stop during the count-in cancels it\n");
+    Sim& sim = *internalSim(2);
+    sim.logLevel[kLvlCountIn] = true;
+    sim.s.play = true;
+    sim.runUntil(30000);
+    sim.s.play = false;
+    sim.runUntil(96000 * 3);
+    CHECK(sim.metro().empty() && banksOnly(sim, kClickCount, kClickCountAccent).size() == 2, "nothing plays after cancel");
+    CHECK(sim.e.status() == kStatusStopped && sim.levelLog[kLvlCountIn].back() < 1.0f, "stopped, count gate low");
+    delete &sim;
+}
+
+static void testRecording() {
+    std::printf("  Recording: manual take ends on the bar line after disarm\n");
+    {
+        Sim& sim = *internalSim(0);
+        sim.s.recArm = true;
+        sim.trigEnabled[kOutRecTrig] = true;
+        sim.s.play = true;
+        const uint64_t T0 = sim.now;
+        sim.runUntil(T0 + 96000 * 2 + 48000);
+        sim.s.recArm = false;  // disarm mid bar 3
+        sim.runUntil(T0 + 96000 * 5);
+        auto rt = sim.edges(kOutRecTrig);
+        CHECK(rt.size() == 2 && rt[0] == T0 && rt[1] == T0 + 96000 * 3, "record pulse at bar 1, stop pulse on bar 4 line");
+        CHECK(sim.e.takeRecDisarm() && sim.e.transportOn() && sim.metro().back().t > T0 + 96000 * 4,
+              "keeps playing, asks the host to disarm");
+        delete &sim;
+    }
+    std::printf("  Recording: fixed 2-bar take (gate mode) and rec MIDI note\n");
+    {
+        Sim& sim = *internalSim(1);
+        sim.s.recArm = true;
+        sim.s.recMode = kRecGate;
+        sim.s.recLengthBars = 2;
+        sim.s.recNote = 60;
+        sim.s.midiOut = true;
+        sim.s.midiLayers = 0;  // MIDI layers: None
+        sim.logLevel[kLvlRecGate] = true;
+        sim.s.play = true;
+        const uint64_t T0 = sim.now, B1 = T0 + 96000;  // after a 1-bar count-in
+        sim.runUntil(B1 + 96000 * 4);
+        CHECK(firstHigh(sim.levelLog[kLvlRecGate]) == B1 && firstLow(sim.levelLog[kLvlRecGate], B1) == B1 + 192000,
+              "rec gate high for exactly 2 bars from bar 1 (after the count-in)");
+        std::vector<MidiOutEv> nm;
+        for (auto& m : sim.midiOut) if (m.len == 3 && m.b1 == 60) nm.push_back(m);
+        CHECK(nm.size() == 2 && nm[0].b0 == 0x99 && nm[1].b0 == 0x89 && nm[1].t <= B1 + 192000 && nm[1].t + 24 > B1 + 192000,
+              "rec note: on at the start, off at the end (gate mode)");
+        delete &sim;
+    }
+    std::printf("  Recording: stop while recording is quantized to the bar line\n");
+    {
+        Sim& sim = *internalSim(0);
+        sim.s.recArm = true;
+        sim.s.recMode = kRecGate;
+        sim.s.midiClockOut = sim.s.midiOut = true;
+        sim.logLevel[kLvlRecGate] = sim.logLevel[kLvlRun] = true;
+        sim.s.play = true;
+        const uint64_t T0 = sim.now;
+        sim.runUntil(T0 + 96000 + 48000);  // halfway through bar 2
+        sim.s.play = false;
+        sim.runUntil(T0 + 96000 + 48010);
+        CHECK(!sim.e.transportOn(), "reports stopped right away (stop pending)");
+        sim.runUntil(T0 + 96000 * 4);
+        const uint64_t B3 = T0 + 192000;
+        CHECK(firstLow(sim.levelLog[kLvlRecGate], T0) == B3 && firstLow(sim.levelLog[kLvlRun], T0 + 10) == B3,
+              "rec gate and Run out fall exactly on the next bar line");
+        auto m = sim.metro();
+        CHECK(!m.empty() && m.back().t < B3, "no click on the stopping bar line");
+        bool fc = false;
+        for (auto& r : realtime(sim)) if (r.b0 == 0xFC && r.t <= B3 && r.t + 24 > B3) fc = true;
+        CHECK(fc && sim.e.status() == kStatusStopped, "MIDI Stop on the bar line");
+        delete &sim;
+    }
+    std::printf("  Recording: arm while playing punches in on the next bar line; plain stop is immediate\n");
+    {
+        Sim& sim = *internalSim(0);
+        sim.trigEnabled[kOutRecTrig] = true;
+        sim.s.play = true;
+        const uint64_t T0 = sim.now;
+        sim.runUntil(T0 + 96000 + 30000);
+        sim.s.recArm = true;
+        sim.runUntil(T0 + 96000 * 3 + 500);
+        auto rt = sim.edges(kOutRecTrig);
+        CHECK(!rt.empty() && rt[0] == T0 + 192000, "punch-in at bar 3");
+        delete &sim;
+
+        Sim& p = *internalSim(0);
+        p.s.play = true;
+        p.runUntil(30000);
+        p.s.play = false;
+        p.runUntil(30024);
+        size_t n = p.metro().size();
+        p.runUntil(96000 * 2);
+        CHECK(!p.e.transportOn() && p.metro().size() == n, "stop without recording is immediate");
+        delete &p;
+    }
+}
+
+static void testTransportInputs() {
+    std::printf("  CV transport TOGGLE (internal) and MIDI clock out following a CV clock\n");
+    {
+        Sim& sim = *internalSim(0);
+        sim.s.cvTransport = kCvToggle;
+        sim.s.play = false;
+        sim.gate.push_back({10000, 10240});
+        sim.gate.push_back({10000 + 96000 + 3000, 10000 + 96000 + 3240});
+        sim.runUntil(10000 + 96000 * 3);
+        auto m = sim.metro();
+        CHECK(!m.empty() && m[0].t == 10000 && m.back().t < 10000 + 96000 + 3000, "first trigger starts, second stops");
+        delete &sim;
+    }
+    {
+        Sim sim;
+        sim.s.cvResolution = kCv24ppqn;
+        sim.s.midiClockOut = sim.s.midiOut = true;
+        sim.gate.push_back({500, 1000 + 24000 * 8 + 500});
+        sim.addPulses(1000, 1000, 24 * 10);
+        sim.runUntil(1000 + 24000 * 10);
+        auto rt = realtime(sim);
+        int f8 = 0;
+        for (auto& r : rt) if (r.b0 == 0xF8) ++f8;
+        CHECK(!rt.empty() && rt[0].b0 == 0xFA && rt.back().b0 == 0xFC && f8 == 24 * 8 + 1,
+              "Start, one MIDI clock per 24 PPQN pulse, Stop on RUN low (%d clocks)", f8);
+        delete (Sim*)nullptr;
+    }
+    {
+        Sim sim;
+        sim.s.source = kSourceMIDI;
+        sim.s.midiClockOut = sim.s.midiOut = true;  // never echoes clock when following MIDI
+        sim.addMidi(500, 0xFA);
+        sim.addMidiClocks(1000, 120, 48);
+        sim.runUntil(60000);
+        CHECK(realtime(sim).empty(), "no MIDI clock out when the source is MIDI");
+    }
+}
+
+static void testMidiMaster() {
+    std::printf("  MIDI out is the master switch; MIDI layers None sends clock without notes\n");
+    Sim& a = *internalSim(1);
+    a.s.midiClockOut = true;  // MIDI out off: nothing
+    a.s.countInMidi = true;
+    a.s.recArm = true;
+    a.s.recNote = 60;
+    a.s.play = true;
+    a.runUntil(96000 * 3);
+    CHECK(a.midiOut.empty(), "no MIDI at all with MIDI out off");
+    delete &a;
+    Sim& b = *internalSim(0);
+    b.s.midiClockOut = b.s.midiOut = true;
+    b.s.midiLayers = 0;
+    b.s.play = true;
+    b.runUntil(96000 * 2);
+    size_t notes = 0;
+    for (auto& m : b.midiOut) if (m.len == 3) ++notes;
+    CHECK(notes == 0 && !realtime(b).empty(), "layers None: clock and Start only (%zu notes)", notes);
+    delete &b;
+}
+
 int main() {
-    std::printf("Disting NT Metronome engine tests v1_6 (48 kHz)\n\n[CV]\n");
+    std::printf("Disting NT Metronome engine tests v1.9 (48 kHz)\n\n[CV]\n");
     testCvRunBasic(kDivBeats, 24000, "beat");
     testCvRunBasic(kDiv8, 12000, "1/8");
     testCvRunBasic(kDiv16, 6000, "1/16");
@@ -1142,6 +1398,12 @@ int main() {
     testGhostVelocity();
     testMidiDrumOut();
     testMidiAccentGhostNotes();
+    std::printf("\n[Transport / count-in / recording]\n");
+    testCountIn();
+    testCountInCancel();
+    testRecording();
+    testTransportInputs();
+    testMidiMaster();
     std::printf("\n%d checks passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
