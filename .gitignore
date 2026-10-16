@@ -1,0 +1,7 @@
+plugins/
+build/
+distingNT_API/
+distingNT_API-*/
+*.o
+.DS_Store
+Thumbs.db
