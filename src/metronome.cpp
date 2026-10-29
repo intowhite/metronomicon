@@ -11,6 +11,9 @@
 
 #define METRO_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
+// Shown on the algorithm's screen and in its description. Keep in step with CHANGELOG.md.
+#define METRONOMICON_VERSION "1.10"
+
 enum {
     // Clock & Transport
     kParamSource,
@@ -96,6 +99,8 @@ enum {
     kParamRecMode,
     kParamRecNote,
     kParamRunOut,
+    // v1.10
+    kParamMetroToggleIn,
 
     kNumParams
 };
@@ -224,9 +229,11 @@ static const _NT_parameter kParameterTemplate[] = {
     METRO_ENUM("Rec out mode", 1, 0, enumRecMode)
     {.name = "Rec MIDI note", .min = 0, .max = 128, .def = 128, .unit = kNT_unitHasStrings, .scaling = 0, .enumStrings = NULL},
     NT_PARAMETER_CV_OUTPUT("Run out", 0, 0)
+    // v1.10: each trigger flips Metro audio (the count-in still plays when it is off)
+    NT_PARAMETER_CV_INPUT("Metro toggle in", 0, 0)
 };
 
-static const uint8_t pageMetro[] = {kParamTimeSig,      kParamDivision,     kParamMetroAudio,   kParamDownLevel,
+static const uint8_t pageMetro[] = {kParamTimeSig,      kParamDivision,     kParamMetroAudio,   kParamMetroToggleIn, kParamDownLevel,
                                     kParamBeatLevel,    kParamSubLevel,     kParamMetroOut,     kParamMetroOutMode,
                                     kParamBaseClockOut, kParamBaseClockRes, kParamBaseResetOut, kParamBaseResetMode};
 static const uint8_t pagePoly[] = {kParamPolyEnable,  kParamPolyPreset,   kParamPolyX,        kParamPolyY,
@@ -255,7 +262,7 @@ namespace {
 struct MetronomeAlgorithm : public _NT_algorithm {
     MetronomeAlgorithm()
         : lastClockBus(-1), lastTransportBus(-1), lastTapBus(-1), lastTap(-1), applyingPreset(0), shownGroup(-1),
-          blocks(0), tapRequests(0), tapsHandled(0) {}
+          blocks(0), tapRequests(0), tapsHandled(0), lastToggleBus(-1), metroOverride(-1) {}
 
     metro::Engine engine;
     int lastClockBus, lastTransportBus, lastTapBus, lastTap;
@@ -264,6 +271,9 @@ struct MetronomeAlgorithm : public _NT_algorithm {
     uint32_t blocks;     // audio blocks since construction (to tell preset loading from editing)
     volatile uint32_t tapRequests;  // encoder-button taps from the UI thread
     uint32_t tapsHandled;
+    metro::ToggleInput metroToggle;
+    int lastToggleBus;
+    int metroOverride;  // -1 = none, else Metro audio value until the parameter catches up
     _NT_parameter params[kNumParams];
     _NT_parameterPage pageList[6];
     _NT_parameterPages pageSet;
@@ -350,6 +360,7 @@ static _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs, const _NT_a
                kParameterTemplate[kParamMidiClockOut].def != 0);
     alg->parameterPages = &alg->pageSet;
     alg->engine.init((float)NT_globals.sampleRate);
+    alg->metroToggle.init((float)NT_globals.sampleRate);
     return alg;
 }
 
@@ -496,6 +507,24 @@ static void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     s.meter = v[kParamTimeSig];
     s.division = v[kParamDivision];
     s.metroAudio = v[kParamMetroAudio] != 0;
+    // Metro toggle in: each trigger flips Metro audio. Applied this block; the parameter is
+    // updated too, so the screen and presets show the real state.
+    {
+        const int tb = v[kParamMetroToggleIn];
+        if (tb != a->lastToggleBus) { a->metroToggle.prime(); a->lastToggleBus = tb; }
+        if (a->metroOverride >= 0) {
+            if ((int)s.metroAudio == a->metroOverride) a->metroOverride = -1;
+            else s.metroAudio = a->metroOverride != 0;
+        }
+        const int flips = a->metroToggle.scan(busPtr(busFrames, tb, numFrames), numFrames);
+        if (flips & 1) {
+            s.metroAudio = !s.metroAudio;
+            a->metroOverride = s.metroAudio ? 1 : 0;
+            int32_t idx = algIndex(self);
+            if (idx >= 0)
+                NT_setParameterFromAudio((uint32_t)idx, kParamMetroAudio + NT_parameterOffset(), (int16_t)a->metroOverride);
+        }
+    }
     s.levelDown = v[kParamDownLevel] * 0.01f;
     s.levelBeat = v[kParamBeatLevel] * 0.01f;
     s.levelSub = v[kParamSubLevel] * 0.01f;
@@ -679,6 +708,7 @@ static bool draw(_NT_algorithm* self) {
         NT_drawText(0, 44, buf, 15, kNT_textLeft, kNT_textLarge);
         NT_drawText(80, 44, "BPM", 8, kNT_textLeft, kNT_textNormal);
     }
+    NT_drawText(80, 27, "v" METRONOMICON_VERSION, 5, kNT_textLeft, kNT_textTiny);
     if (v[kParamSource] == metro::kSourceInternal)
         NT_drawText(80, 34, st == metro::kStatusStopped ? "L:play R:tap" : "L:stop R:tap", 6, kNT_textLeft, kNT_textTiny);
 
@@ -769,7 +799,7 @@ static int parameterString(_NT_algorithm* self, int p, int v, char* buff) {
 static const _NT_factory factory = {
     .guid = NT_MULTICHAR('M', 'e', 't', 'r'),
     .name = "Metronomicon",
-    .description = "Accented metronome + polyrhythm + rhythm patterns; MIDI, CV or internal clock",
+    .description = "Metronomicon " METRONOMICON_VERSION ": metronome, count-in & rec, polyrhythm, patterns",
     .numSpecifications = 0,
     .specifications = NULL,
     .calculateStaticRequirements = NULL,

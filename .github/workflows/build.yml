@@ -26,6 +26,17 @@ jobs:
       - name: Fetch Disting NT API
         run: git clone --depth 1 --branch "$NT_API_TAG" https://github.com/expertsleepersltd/distingNT_API.git
 
+      - name: Check repository layout
+        # Source files uploaded to the wrong folder would silently build old code.
+        run: |
+          stray=$(ls *.cpp *.h test_engine.cpp gen_patterns.py build.yml 2>/dev/null || true)
+          if [ -n "$stray" ]; then
+            echo "::error::These files belong in src/, tests/, tools/ or .github/workflows/, not the repo root: $stray"
+            exit 1
+          fi
+          grep -q 'METRONOMICON_VERSION "' src/metronome.cpp
+          echo "Building Metronomicon $(grep -o 'METRONOMICON_VERSION "[^"]*"' src/metronome.cpp | cut -d'"' -f2)"
+
       - name: Host tests
         run: make test
 

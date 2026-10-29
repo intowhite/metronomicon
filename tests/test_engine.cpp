@@ -1329,8 +1329,27 @@ static void testMidiMaster() {
     delete &b;
 }
 
+static void testToggleInput() {
+    std::printf("  Toggle input: one flip per trigger, noise and bounce rejected, no flip on prime\n");
+    ToggleInput ti;
+    ti.init((float)SR);
+    std::vector<float> in(48000, 0.0f);
+    for (int i = 0; i < 48000; ++i) in[i] = 0.05f * ((i * 7919) % 13 - 6) / 6.0f;  // +-50 mV noise
+    auto pulse = [&](int at, int len) { for (int i = at; i < at + len && i < 48000; ++i) in[i] = 5.0f; };
+    pulse(5000, 240);                           // trigger
+    pulse(20000, 100); pulse(20300, 100);       // bouncy contact: counts once
+    pulse(30000, 12000);                        // long gate: counts once
+    int total = 0;
+    for (int b = 0; b < 48000; b += 24) total += ti.scan(&in[b], 24);
+    CHECK(total == 3, "3 triggers counted (%d)", total);
+    ToggleInput hi;
+    hi.init((float)SR);
+    std::vector<float> g(480, 5.0f);
+    CHECK(hi.scan(g.data(), 480) == 0, "an input already high when connected doesn't flip");
+}
+
 int main() {
-    std::printf("Disting NT Metronome engine tests v1.9 (48 kHz)\n\n[CV]\n");
+    std::printf("Disting NT Metronome engine tests v1.10 (48 kHz)\n\n[CV]\n");
     testCvRunBasic(kDivBeats, 24000, "beat");
     testCvRunBasic(kDiv8, 12000, "1/8");
     testCvRunBasic(kDiv16, 6000, "1/16");
@@ -1404,6 +1423,7 @@ int main() {
     testRecording();
     testTransportInputs();
     testMidiMaster();
+    testToggleInput();
     std::printf("\n%d checks passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

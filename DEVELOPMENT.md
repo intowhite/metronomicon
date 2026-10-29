@@ -32,7 +32,7 @@ src/patterns.h           pattern table (generated — don't edit)
 src/metronome.cpp        Disting NT glue: parameters, pages, buses, MIDI, display, custom UI
 tests/test_engine.cpp    host test suite with simulated CV / MIDI clocks
 tools/gen_patterns.py    readable pattern list -> src/patterns.h
-docs/                    manual, these notes, banner (SVG source + PNG)
+docs/                    README banner (SVG source + PNG)
 ```
 
 ## Adding or editing patterns

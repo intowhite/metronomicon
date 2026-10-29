@@ -5,6 +5,8 @@
   on/off. The count-in still plays while it's off, so you can silence the click after a take
   and still be counted in on the next one. (Play/stop from a trigger: *CV transport* =
   TOGGLE, Internal clock.)
+- The version number is shown on the algorithm's screen (small text above the BPM) and in
+  its description, so you can see which build is loaded.
 
 ## 1.9
 - Removed *Count-in out*.

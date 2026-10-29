@@ -439,6 +439,34 @@ struct Layer {
     }
 };
 
+// Rising-edge detector for a trigger/gate input that flips a setting.
+// Schmitt thresholds (high > 1 V, low < 0.5 V) and a hold-off reject noise and bounce.
+struct ToggleInput {
+    bool high = false, primed = false;
+    int32_t holdoff = 0, holdoffLen = 2400;  // 50 ms at 48 kHz
+    void init(float sr) { holdoffLen = (int32_t)(0.05f * sr); prime(); }
+    void prime() { primed = false; holdoff = 0; }
+    // Returns the number of triggers (rising edges) in the block.
+    int scan(const float* in, int n) {
+        if (!in) { primed = false; return 0; }
+        int count = 0;
+        for (int i = 0; i < n; ++i) {
+            const float v = in[i];
+            if (holdoff > 0) --holdoff;
+            if (!primed) { high = v > 1.0f; primed = true; continue; }  // adopt the level, no edge
+            if (!high) {
+                if (v > 1.0f) {
+                    high = true;
+                    if (holdoff == 0) { ++count; holdoff = holdoffLen; }
+                }
+            } else if (v < 0.5f) {
+                high = false;
+            }
+        }
+        return count;
+    }
+};
+
 // ---------------------------------------------------------------- engine
 class Engine {
 public:
