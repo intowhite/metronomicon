@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.10
+- **Metro toggle in** (Metronome page): each trigger on this CV input turns *Metro audio*
+  on/off. The count-in still plays while it's off, so you can silence the click after a take
+  and still be counted in on the next one. (Play/stop from a trigger: *CV transport* =
+  TOGGLE, Internal clock.)
+
 ## 1.9
 - Removed *Count-in out*.
 - *Clock in count* is now **Count-in clock**: Wait (default) / Run.
