@@ -21,8 +21,18 @@ make test                     # host test suite, any C++11 compiler
 .\build.ps1                   # or: powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-Pushing a tag `v*` runs `.github/workflows/build.yml`: host tests, plug-in build, and a
-release with `metronomicon.o` attached.
+Pushing a tag `v*` runs `.github/workflows/build.yml`: layout check, host tests, plug-in
+build, and a release with `metronomicon.o` attached and the matching `CHANGELOG.md` section
+as its notes.
+
+## Releasing
+
+1. Add a `## X.Y` section at the top of `CHANGELOG.md` (what changed since the last release).
+2. Set `METRONOMICON_VERSION` in `src/metronome.cpp` to the same `X.Y`.
+3. Commit, push, then `git tag vX.Y && git push origin vX.Y`.
+
+The workflow refuses to release if the tag, the code's version and the changelog don't match.
+Never reuse a published tag — bump the version instead.
 
 ## Layout
 

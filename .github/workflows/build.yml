@@ -48,8 +48,19 @@ jobs:
           name: metronomicon.o
           path: plugins/metronomicon.o
 
+      - name: Release notes from CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v v="$ver" '$0 == "## " v {on=1; next} /^## / && on {exit} on' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then echo "::error::CHANGELOG.md has no '## $ver' section"; exit 1; fi
+          grep -q "METRONOMICON_VERSION \"$ver\"" src/metronome.cpp || { echo "::error::src/metronome.cpp version does not match tag $GITHUB_REF_NAME"; exit 1; }
+          cat release_notes.md
+
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: Metronomicon ${{ github.ref_name }}
+          body_path: release_notes.md
           files: plugins/metronomicon.o
