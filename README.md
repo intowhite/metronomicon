@@ -64,7 +64,7 @@ quantisation: patch the clock in, press play, hear clicks that sit exactly on th
 1. Download `metronomicon.o` from [Releases](../../releases).
 2. Copy it to `/programs/plug-ins/` on the Disting NT's SD card. If you had an older
    `metronome.o`, delete it, or both will load.
-3. Add the **Metronomicon** algorithm (Utility category). Its screen shows the version (e.g. `v1.10.1`) above the BPM.
+3. Add the **Metronomicon** algorithm (Utility category). Its screen shows the version (e.g. `v1.10`) above the BPM.
 
 Requires Disting NT firmware **1.18** or newer.
 
@@ -110,7 +110,7 @@ Requires Disting NT firmware **1.18** or newer.
 | Small line | Polyrhythm ratio and current pulse; current pattern (dimmed when that layer's audio is off) |
 | Bottom | Time signature, click division, and `REC 2/4`, `REC END`, `ARMED`, `MUTED` or `metro off` |
 | Hint | `L:play R:tap` (Internal clock) |
-| Version | Small version number (e.g. `v1.10.1`) above the BPM — the build that's loaded |
+| Version | Small version number (e.g. `v1.10`) above the BPM — the build that's loaded |
 
 **Status:** STOPPED (transport stopped) · WAITING (playing, waiting for the first clock) ·
 ACQUIRING (measuring tempo / finding the bar) · RUNNING · CLOCK LOST (clock stopped arriving

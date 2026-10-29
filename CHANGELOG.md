@@ -1,8 +1,6 @@
 # Changelog
 
-## 1.10.1
-The 1.10 download contained the 1.9 build by mistake. This release is 1.10 as intended.
-
+## 1.10
 - **Metro toggle in** (Metronome page): a CV input where each trigger turns the click
   (*Metro audio*) on or off. The parameter flips with it, so the screen and saved presets show
   the real state. Bounce and noise are ignored.
@@ -17,12 +15,6 @@ The 1.10 download contained the 1.9 build by mistake. This release is 1.10 as in
 
 **Upgrading:** replace `metronomicon.o` on the SD card and power-cycle. Presets from 1.9 load
 unchanged.
-
-## 1.10
-- **Metro toggle in** (Metronome page): each trigger on this CV input turns *Metro audio*
-  on/off. The count-in still plays while it's off, so you can silence the click after a take
-  and still be counted in on the next one. (Play/stop from a trigger: *CV transport* =
-  TOGGLE, Internal clock.)
 
 ## 1.9
 - Removed *Count-in out*.

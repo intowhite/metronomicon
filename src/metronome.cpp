@@ -12,7 +12,7 @@
 #define METRO_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 // Shown on the algorithm's screen and in its description. Keep in step with CHANGELOG.md.
-#define METRONOMICON_VERSION "1.10.1"
+#define METRONOMICON_VERSION "1.10"
 
 enum {
     // Clock & Transport
